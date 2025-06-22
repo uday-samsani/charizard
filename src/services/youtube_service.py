@@ -559,7 +559,177 @@ class EnhancedYouTubeService:
             return []
 
     def detect_sponsorships(self, transcript: str, title: str = "", description: str = "") -> Dict[str, Any]:
-        """Detect sponsorships in video transcript, title, and description."""
+        """Detect sponsorships in video transcript, title, and description using LLM analysis."""
+        try:
+            # Use LLM-based detection as primary method
+            llm_analysis = self.detect_sponsorships_with_llm(transcript, title, description)
+            
+            # Fallback to regex-based detection if LLM fails
+            if llm_analysis.get("error") or not llm_analysis.get("has_sponsorship"):
+                regex_analysis = self.detect_sponsorships_regex(transcript, title, description)
+                return regex_analysis
+            
+            return llm_analysis
+            
+        except Exception as e:
+            logger.error(f"Error detecting sponsorships: {e}")
+            # Fallback to regex method
+            return self.detect_sponsorships_regex(transcript, title, description)
+
+    def detect_sponsorships_with_llm(self, transcript: str, title: str = "", description: str = "") -> Dict[str, Any]:
+        """Detect sponsorships using LLM analysis of transcript."""
+        try:
+            # Try to import AI service with fallback
+            try:
+                from src.services.ai_service import AIService
+            except ImportError:
+                try:
+                    from services.ai_service import AIService
+                except ImportError:
+                    logger.error("AIService not available, falling back to regex detection")
+                    return {"error": "AIService not available"}
+            
+            # Check if OpenAI API key is available
+            import os
+            if not os.getenv('OPENAI_API_KEY'):
+                logger.warning("OpenAI API key not set, falling back to regex detection")
+                return {"error": "OpenAI API key not configured"}
+            
+            # Initialize AI service
+            ai_service = AIService()
+            
+            # Prepare the text for analysis
+            full_text = f"Title: {title}\nDescription: {description}\nTranscript: {transcript}"
+            
+            # Create a comprehensive prompt for sponsorship detection
+            prompt = f"""
+            Analyze the following YouTube video content for sponsorship indicators. Look for:
+
+            1. **Direct Sponsorship Mentions**: "sponsored by", "partnered with", "thanks to [company]"
+            2. **Product Promotions**: Mentions of specific products, services, or brands
+            3. **Call-to-Action**: "check out", "visit", "use code", "link in description"
+            4. **Commercial Language**: Promotional language, discount codes, affiliate links
+            5. **Brand Integration**: Natural or forced brand mentions within content
+
+            Video Content:
+            {full_text[:4000]}  # Limit to avoid token limits
+
+            Provide your analysis in the following JSON format:
+            {{
+                "has_sponsorship": true/false,
+                "sponsorship_level": "none/low/medium/high",
+                "confidence_score": 0-100,
+                "sponsors": [
+                    {{
+                        "name": "company name",
+                        "type": "direct/indirect/product_placement",
+                        "confidence": 0-100,
+                        "mentions": ["specific mention 1", "specific mention 2"]
+                    }}
+                ],
+                "promotional_elements": [
+                    {{
+                        "type": "discount_code/call_to_action/product_mention/affiliate_link",
+                        "content": "specific content",
+                        "confidence": 0-100
+                    }}
+                ],
+                "sponsorship_segments": [
+                    "exact text segment 1",
+                    "exact text segment 2"
+                ],
+                "analysis_summary": "Brief explanation of findings"
+            }}
+
+            Be thorough but accurate. Only mark as sponsorship if there are clear commercial indicators.
+            """
+
+            # Get LLM analysis
+            response = ai_service.generate_content(prompt, "sponsorship detection")
+            
+            # Parse the response
+            try:
+                import json
+                import re
+                
+                # Extract JSON from response
+                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                if json_match:
+                    analysis = json.loads(json_match.group())
+                else:
+                    # Fallback parsing
+                    analysis = self.parse_sponsorship_response(response)
+                
+                # Validate and structure the response
+                return {
+                    "has_sponsorship": analysis.get("has_sponsorship", False),
+                    "sponsorship_level": analysis.get("sponsorship_level", "none"),
+                    "confidence_score": analysis.get("confidence_score", 0),
+                    "detected_indicators": [elem.get("type") for elem in analysis.get("promotional_elements", [])],
+                    "detected_companies": [sponsor.get("name") for sponsor in analysis.get("sponsors", [])],
+                    "extracted_companies": [sponsor.get("name") for sponsor in analysis.get("sponsors", [])],
+                    "discount_codes": [elem.get("content") for elem in analysis.get("promotional_elements", []) 
+                                     if elem.get("type") == "discount_code"],
+                    "urls": [],  # LLM might not extract URLs reliably
+                    "sponsorship_text": analysis.get("sponsorship_segments", []),
+                    "llm_analysis": analysis.get("analysis_summary", ""),
+                    "sponsors": analysis.get("sponsors", []),
+                    "promotional_elements": analysis.get("promotional_elements", []),
+                    "detection_method": "llm_analysis"
+                }
+                
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.error(f"Error parsing LLM response: {e}")
+                return {"error": f"Failed to parse LLM response: {str(e)}"}
+                
+        except Exception as e:
+            logger.error(f"Error in LLM sponsorship detection: {e}")
+            return {"error": f"LLM analysis failed: {str(e)}"}
+
+    def parse_sponsorship_response(self, response: str) -> Dict[str, Any]:
+        """Parse LLM response when JSON parsing fails."""
+        try:
+            # Extract key information using regex patterns
+            has_sponsorship = bool(re.search(r'"has_sponsorship":\s*true', response, re.IGNORECASE))
+            
+            # Extract sponsorship level
+            level_match = re.search(r'"sponsorship_level":\s*"([^"]+)"', response, re.IGNORECASE)
+            sponsorship_level = level_match.group(1) if level_match else "none"
+            
+            # Extract confidence score
+            confidence_match = re.search(r'"confidence_score":\s*(\d+)', response)
+            confidence_score = int(confidence_match.group(1)) if confidence_match else 0
+            
+            # Extract company names
+            companies = re.findall(r'"name":\s*"([^"]+)"', response)
+            
+            # Extract promotional elements
+            promotional_types = re.findall(r'"type":\s*"([^"]+)"', response)
+            
+            return {
+                "has_sponsorship": has_sponsorship,
+                "sponsorship_level": sponsorship_level,
+                "confidence_score": confidence_score,
+                "sponsors": [{"name": company, "type": "detected", "confidence": 70} for company in companies],
+                "promotional_elements": [{"type": ptype, "content": "", "confidence": 60} for ptype in promotional_types],
+                "sponsorship_segments": [],
+                "analysis_summary": "Parsed from LLM response"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error parsing sponsorship response: {e}")
+            return {
+                "has_sponsorship": False,
+                "sponsorship_level": "none",
+                "confidence_score": 0,
+                "sponsors": [],
+                "promotional_elements": [],
+                "sponsorship_segments": [],
+                "analysis_summary": "Failed to parse response"
+            }
+
+    def detect_sponsorships_regex(self, transcript: str, title: str = "", description: str = "") -> Dict[str, Any]:
+        """Fallback regex-based sponsorship detection (original method)."""
         try:
             # Common sponsorship indicators
             sponsorship_indicators = [
@@ -581,7 +751,9 @@ class EnhancedYouTubeService:
                 r'head\s+over\s+to',
                 r'check\s+out\s+.*?\s+website',
                 r'visit\s+.*?\s+website',
-                r'go\s+to\s+.*?\s+website'
+                r'go\s+to\s+.*?\s+website',
+                r'click\s+the\s+link\s+in\s+the\s+description',
+                r'segway\s+9',
             ]
             
             # Common sponsorship companies and brands
@@ -668,7 +840,8 @@ class EnhancedYouTubeService:
                 "extracted_companies": list(set(extracted_companies)),
                 "discount_codes": list(set(discount_codes)),
                 "urls": list(set(urls)),
-                "sponsorship_text": self.extract_sponsorship_text(transcript, title, description)
+                "sponsorship_text": self.extract_sponsorship_text(transcript, title, description),
+                "detection_method": "regex_fallback"
             }
             
         except Exception as e:
@@ -682,7 +855,8 @@ class EnhancedYouTubeService:
                 "extracted_companies": [],
                 "discount_codes": [],
                 "urls": [],
-                "sponsorship_text": []
+                "sponsorship_text": [],
+                "detection_method": "regex_fallback"
             }
 
     def extract_sponsorship_text(self, transcript: str, title: str = "", description: str = "") -> List[str]:

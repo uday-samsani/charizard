@@ -23,7 +23,10 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
-from src.agents.analytics_agent import AnalyticsAgent
+try:
+    from src.agents.analytics_agent import AnalyticsAgent
+except ImportError:
+    from agents.analytics_agent import AnalyticsAgent
 from dotenv import load_dotenv
 
 load_dotenv()
